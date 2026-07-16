@@ -39,26 +39,41 @@ class FashionEncoder:
 
     @staticmethod
     def _as_features(out, projection) -> torch.Tensor:
-        """Coerce a get_*_features() return value into a projected tensor.
+        """Coerce a get_*_features() return value into projected features.
 
-        Older transformers return the already-projected tensor. Newer versions
-        may hand back the encoder output object (BaseModelOutputWithPooling)
-        instead, in which case we project the pooled output ourselves. CLIP's
-        vision/text transformers already apply their final layernorm before
-        pooling, so ``projection(pooler_output)`` reproduces the standard
-        image/text embedding exactly.
+        transformers changed this API's return type across versions:
+          * older: returns the already-projected tensor  -> pass through.
+          * newer: wraps it in an output object          -> unwrap it.
+
+        We disambiguate by DIMENSION rather than by version sniffing, since the
+        wrapped ``pooler_output`` may be either already-projected features
+        (last dim == projection.out_features) or a raw encoder pooled state
+        (last dim == projection.in_features). For CLIP ViT-B/32 the vision
+        tower is 768-d and the shared embedding space is 512-d, so the two
+        cases are distinguishable. We prefer the already-projected reading when
+        both match, which is what current transformers returns.
         """
         if isinstance(out, torch.Tensor):
-            return out
-        pooled = getattr(out, "pooler_output", None)
-        if pooled is None and isinstance(out, (tuple, list)):
-            pooled = out[1] if len(out) > 1 else out[0]
-        if pooled is None:
-            last = getattr(out, "last_hidden_state", None)
-            if last is None:
-                raise TypeError(f"Cannot extract features from {type(out)}")
-            pooled = last[:, 0]
-        return projection(pooled)
+            feats = out
+        else:
+            feats = getattr(out, "pooler_output", None)
+            if feats is None and isinstance(out, (tuple, list)):
+                feats = out[1] if len(out) > 1 else out[0]
+            if feats is None:
+                last = getattr(out, "last_hidden_state", None)
+                if last is None:
+                    raise TypeError(f"Cannot extract features from {type(out)}")
+                feats = last[:, 0]
+
+        dim = feats.shape[-1]
+        if dim == projection.out_features:
+            return feats                    # already in the shared space
+        if dim == projection.in_features:
+            return projection(feats)        # raw pooled state -> project
+        raise TypeError(
+            f"Unexpected feature dim {dim}; projection expects "
+            f"in={projection.in_features} or out={projection.out_features}"
+        )
 
     @torch.no_grad()
     def encode_images(self, images: Sequence[Image.Image], batch_size: int = 32) -> np.ndarray:
