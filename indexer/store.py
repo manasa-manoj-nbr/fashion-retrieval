@@ -35,17 +35,23 @@ class VectorStore:
         )
 
     # ---- writing -----------------------------------------------------------
-    def add_global(self, ids, embeddings, metadatas):
-        self.global_col.add(ids=list(ids),
-                            embeddings=[e.tolist() for e in embeddings],
-                            metadatas=list(metadatas))
-
-    def add_regions(self, ids, embeddings, metadatas):
+    # NOTE: both writers no-op on an empty batch (a trailing flush after an
+    # exact-multiple batch count would otherwise hand Chroma an empty list,
+    # which it rejects), and use ``upsert`` so re-running the build overwrites
+    # existing ids instead of raising on duplicates -- i.e. indexing is
+    # idempotent and safely resumable.
+    def _write(self, collection, ids, embeddings, metadatas) -> None:
         if not ids:
             return
-        self.region_col.add(ids=list(ids),
-                            embeddings=[e.tolist() for e in embeddings],
-                            metadatas=list(metadatas))
+        collection.upsert(ids=list(ids),
+                          embeddings=[e.tolist() for e in embeddings],
+                          metadatas=list(metadatas))
+
+    def add_global(self, ids, embeddings, metadatas):
+        self._write(self.global_col, ids, embeddings, metadatas)
+
+    def add_regions(self, ids, embeddings, metadatas):
+        self._write(self.region_col, ids, embeddings, metadatas)
 
     # ---- reading -----------------------------------------------------------
     def query_global(self, embedding, n: int) -> List[Dict[str, Any]]:
