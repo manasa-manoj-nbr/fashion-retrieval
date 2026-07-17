@@ -10,3 +10,7 @@ __pycache__/
 .venv/
 venv/
 .env
+
+# Word/Office lock & temp files
+~$*
+*.tmp
