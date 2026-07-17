@@ -23,6 +23,33 @@ from common.config import CONFIG
 from retriever.query_parser import ParsedQuery
 from retriever.search import SearchResult
 
+# A VQA model may name a colour with a near-synonym; accept those as matches
+# rather than punishing the candidate for vocabulary choice.
+_COLOR_ALIASES = {
+    "blue": ("blue", "navy", "teal", "denim"),
+    "red": ("red", "crimson", "maroon", "burgundy"),
+    "white": ("white", "cream", "ivory"),
+    "black": ("black", "dark"),
+    "gray": ("gray", "grey", "silver"),
+    "green": ("green", "olive", "lime"),
+    "yellow": ("yellow", "gold", "mustard"),
+    "brown": ("brown", "tan", "khaki"),
+    "beige": ("beige", "tan", "cream"),
+    "pink": ("pink", "rose"),
+    "purple": ("purple", "violet"),
+    "orange": ("orange",),
+}
+_SCENE_ALIASES = {
+    "office": "indoor", "home": "indoor",
+    "park": "outdoor", "street": "outdoor",
+}
+
+
+def _color_matches(want: str, answer: str) -> bool:
+    """True if a VQA colour answer names the requested colour (or a synonym)."""
+    answer = answer.lower()
+    return any(a in answer for a in _COLOR_ALIASES.get(want, (want,)))
+
 
 class VQAReranker:
     def __init__(self, model_name: str | None = None, device: str | None = None):
@@ -42,29 +69,33 @@ class VQAReranker:
         return self.processor.decode(out[0], skip_special_tokens=True).strip().lower()
 
     def _verify_fraction(self, image: Image.Image, parsed: ParsedQuery) -> float:
-        """Fraction of query constraints the image satisfies (0..1)."""
+        """Fraction of query constraints the image satisfies (0..1).
+
+        IMPORTANT -- we ask OPEN-ENDED questions ("what color is the shirt?"),
+        never leading yes/no ones ("is the shirt red?"). VQA models including
+        BLIP have a strong yes-bias: they answer "yes" to almost any plausible
+        leading question, which made this stage return 1.0 for every candidate
+        and therefore reorder nothing. Forcing the model to *name* the colour
+        makes the check discriminative -- a wrong colour cannot be papered over.
+        """
         checks = 0
         satisfied = 0
         for pair in parsed.pairs:
             checks += 1
             if pair.color:
-                q = f"is the person wearing a {pair.color} {pair.garment_word}?"
-                ans = self._ask(image, q)
-                if ans.startswith("y"):
+                ans = self._ask(image, f"what color is the {pair.garment_word}?")
+                if _color_matches(pair.color, ans):
                     satisfied += 1
-                else:
-                    # Back off to a direct colour question for robustness.
-                    c = self._ask(image, f"what color is the {pair.garment_word}?")
-                    if pair.color in c:
-                        satisfied += 1
             else:
-                q = f"is the person wearing a {pair.garment_word}?"
-                if self._ask(image, q).startswith("y"):
+                # Presence-only: open-ended "what is the person wearing?" is
+                # unreliable, so a yes/no is acceptable here (no colour to bind).
+                if self._ask(image, f"is the person wearing a {pair.garment_word}?").startswith("y"):
                     satisfied += 1
-        # Optional scene check.
+        # Optional scene check, also open-ended.
         if parsed.scene:
             checks += 1
-            if self._ask(image, f"is this in a {parsed.scene}?").startswith("y"):
+            ans = self._ask(image, "where was this photo taken?")
+            if parsed.scene in ans or _SCENE_ALIASES.get(parsed.scene, "") in ans:
                 satisfied += 1
         return satisfied / checks if checks else 0.0
 

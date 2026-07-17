@@ -89,23 +89,61 @@ def binding_test(retriever: FashionRetriever, by_img: Dict[str, List[dict]],
     if not samples:
         return {"pairs": 0}
 
-    def image_vec(img_id):
-        hit = retriever.store.global_col.get(ids=[img_id], include=["embeddings"])
+    store = retriever.store
+
+    def global_vec(img_id):
+        hit = store.global_col.get(ids=[img_id], include=["embeddings"])
         return np.array(hit["embeddings"][0], dtype="float32")
 
-    def score(text, vec):
-        t = encoder.encode_texts(text)[0]
-        return float(np.dot(t, vec))
+    def region_vec(img_id, region_class):
+        hit = store.region_col.get(
+            where={"$and": [{"image_id": img_id}, {"region_class": region_class}]},
+            include=["embeddings"],
+        )
+        # NB: avoid `embs or []` -- Chroma may return a numpy array, whose
+        # truth value is ambiguous and would raise.
+        embs = hit.get("embeddings")
+        if embs is None or len(embs) == 0:
+            return None
+        return np.array(embs[0], dtype="float32")
 
-    correct = 0
+    def txt(s):
+        return encoder.encode_texts(s)[0]
+
+    global_correct = 0
+    region_correct = 0
+    region_evaluated = 0
+
     for img_id, up_c, lo_c in samples:
-        vec = image_vec(img_id)
-        s_correct = score(f"a {up_c} top and {lo_c} pants", vec)
-        s_swapped = score(f"a {lo_c} top and {up_c} pants", vec)
-        if s_correct > s_swapped:
-            correct += 1
-    return {"pairs": len(samples),
-            "binding_accuracy": round(correct / len(samples), 4)}
+        # --- A) GLOBAL (single-vector, vanilla-CLIP-style) ------------------
+        gv = global_vec(img_id)
+        s_ok = float(np.dot(txt(f"a {up_c} top and {lo_c} pants"), gv))
+        s_sw = float(np.dot(txt(f"a {lo_c} top and {up_c} pants"), gv))
+        if s_ok > s_sw:
+            global_correct += 1
+
+        # --- B) REGION AND-scoring (our pipeline) ---------------------------
+        # Same images, same colours -- only the scoring changes. Each attribute
+        # is matched against ITS OWN garment region and combined with a min
+        # (logical AND), which is exactly what a single global vector cannot do.
+        uv, lv = region_vec(img_id, "upper"), region_vec(img_id, "lower")
+        if uv is None or lv is None:
+            continue
+        region_evaluated += 1
+        r_ok = min(float(np.dot(txt(f"a {up_c} top"), uv)),
+                   float(np.dot(txt(f"{lo_c} pants"), lv)))
+        r_sw = min(float(np.dot(txt(f"a {lo_c} top"), uv)),
+                   float(np.dot(txt(f"{up_c} pants"), lv)))
+        if r_ok > r_sw:
+            region_correct += 1
+
+    return {
+        "pairs": len(samples),
+        "global_binding_accuracy": round(global_correct / len(samples), 4),
+        "region_binding_accuracy": (round(region_correct / region_evaluated, 4)
+                                    if region_evaluated else None),
+        "region_pairs_evaluated": region_evaluated,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -145,8 +183,19 @@ def main() -> None:
     by_img = load_region_meta(store)
     print(f"Loaded metadata for {len(by_img)} images.")
 
-    print("\n=== 1. Colour-swap binding test (global embedding) ===")
-    print(binding_test(retriever, by_img))
+    print("\n=== 1. Colour-swap binding test ===")
+    b = binding_test(retriever, by_img)
+    if b.get("pairs"):
+        print(f"  samples: {b['pairs']} images with distinct upper/lower colours")
+        g = b["global_binding_accuracy"]
+        r = b["region_binding_accuracy"]
+        print(f"  {'global (vanilla-CLIP style)':<32} {g:.3f}   (chance = 0.500)")
+        if r is not None:
+            print(f"  {'region AND-scoring (ours)':<32} {r:.3f}   "
+                  f"on {b['region_pairs_evaluated']} pairs")
+            print(f"  {'absolute lift':<32} {r - g:+.3f}")
+    else:
+        print("  no suitable samples found")
 
     print("\n=== 2. Attribute retrieval: global-only vs full pipeline ===")
     attribute_eval(retriever, by_img, k=5)
