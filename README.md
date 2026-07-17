@@ -20,7 +20,7 @@ This system fixes that with a **decompose → bind → verify** pipeline:
 | **Garment segmentation** | split image into per-garment regions, embed each | enables attribute→garment binding |
 | **Query decomposition** | parse query into (colour, garment) pairs + scene + style | structured intent, not a bag of words |
 | **Compositional AND-scoring** | each attribute must match its garment region (min-fusion) | kills the colour-swap failure mode |
-| **VQA re-rank** | local BLIP verifies each attribute on top candidates | recovers fine-grained cases (tie vs shirt) |
+| **VQA re-rank** | local BLIP re-checks colours it *can* isolate on the top candidates | sharpens precision where a garment is separable; conservatively skips attributes the segmenter can't isolate (e.g. tie vs shirt) rather than guessing |
 
 ## Architecture
 
